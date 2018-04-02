@@ -1,0 +1,275 @@
+---
+title: "Question 3"
+date: "March 16, 2018"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+\pagenumbering{gobble}
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(readr)
+library(countrycode)
+library(reshape2)
+library(ggplot2)
+library(viridis)
+library(datasets)
+library(tree)
+library(randomForest)
+library(gbm)
+library(caret)
+```
+
+## Data pre-processing
+
+The data has problems. Let us first alleviate some of these. 
+
+- The number of employees has "5-Jan" and "25-Jun". I don't quite believe the description that this means e.g. 25 employees in June. I think it is an artefact from a computer translating 1-5 and 6-25 to dates.
+- Gender has all different types of entries. Some of these are misspellings of male/female. There are about 30 some other entries. These include non-binary, neuter, etc. Let's collapse these into "LBGTQ".
+- Work-interference has NAs. Initially I thought these were missing values. However, the question is "If you have a mental health condition, do you feel that it interferes with your work?" The other factors are "Never", "Rarely", "Sometimes", "Often". Hence, having NA reported on this probably reflects persons not having a mental illness. Plotting the distribution of treatment over these factors shows that this is indeed the case (see Appendix).
+- Some people report ages below 0 and over 100. Let us remove any observations that fall not within the reasonable age limit of 28-75. 
+- I think originating countries are not very informative as is since it is extremely unbalanced. We will deal with this later.
+
+```{r warning=FALSE}
+# Read in data and fix no_employees. Also filter based on non-sensical ages.
+set.seed(418910)
+df <- read_csv("mentalhealth.csv") %>%
+  mutate(no_employees = ifelse(no_employees == "25-Jun","6-25",no_employees)) %>%
+  mutate(no_employees = ifelse(no_employees == "5-Jan","1-5",no_employees)) %>%
+  mutate(care_options = ifelse(care_options == "Not sure", "Don't know", care_options)) %>%
+  mutate(work_interfere = ifelse(is.na(work_interfere), "NA", work_interfere)) %>%
+  mutate(Age = as.integer(Age)) %>%
+  filter(Age > 17) %>% filter(Age < 76)
+
+# Remap genders to male, female or LBTGQ.
+male <- c("male", "cis male", "m","make","mal","maile","mail","malr", "cis man", "M", "male (cis)", "cis male", "man","msle")
+female <- c("female", "f", "cis female", "female","femake","woman","cis_female/femme","female (cis)","femail")
+df <- df %>% mutate(Gender = ifelse(tolower(Gender) %in% male, "M", Gender)) %>%
+  mutate(Gender = ifelse(tolower(Gender) %in% female, "F", ifelse(Gender == "M", "M", "LBGTQ")))
+
+# Remove uninformative features.
+df$Timestamp <- NULL
+```
+
+## Pairwise correlations
+
+Translate some of the factors to a numeric format. This will allow us to display a correlation matrix.
+
+```{r fig.height=7, fig.width=10}
+# Appropriate ordering for levels.
+yn <- c("No","Yes")
+ynm <- c("No","Maybe","Yes")
+yndn <- c("No", "Don't know", "Yes")
+yns <- c("No","Some of them","Yes")
+wi <- c("NA","Never","Rarely","Sometimes","Often")
+cs <- c("1-5", "6-25", "26-100", "100-500", "500-1000", "More than 1000")
+lv <- c("Very easy", "Somewhat easy", "Don't know", "Somewhat difficult", "Very difficult")
+
+df2 <- df %>% mutate(obs_consequence = as.numeric(factor(obs_consequence, levels = yn)) - 1) %>%
+  mutate(tech_company = as.numeric(factor(tech_company, levels = yn)) - 1) %>%
+  mutate(remote_work = as.numeric(factor(remote_work, levels = yn)) - 1) %>%
+  mutate(treatment = as.numeric(factor(treatment, levels = yn)) - 1) %>%
+  mutate(family_history = as.numeric(factor(family_history, levels = yn)) - 1) %>%
+  mutate(phys_health_interview = as.numeric(factor(phys_health_interview, levels = ynm)) - 1) %>%
+  mutate(mental_health_interview = as.numeric(factor(mental_health_interview, levels = ynm)) - 1) %>%
+  mutate(phys_health_consequence = as.numeric(factor(phys_health_consequence, levels = ynm)) - 1) %>%
+  mutate(mental_health_consequence = as.numeric(factor(mental_health_consequence, levels = ynm)) - 1) %>%
+  mutate(benefits = as.numeric(factor(benefits, levels = yndn)) - 1) %>%
+  mutate(care_options = as.numeric(factor(care_options, levels = yndn)) - 1) %>%
+  mutate(wellness_program = as.numeric(factor(wellness_program, levels = yndn)) - 1) %>%
+  mutate(seek_help = as.numeric(factor(seek_help, levels = yndn)) - 1) %>%
+  mutate(anonymity = as.numeric(factor(anonymity, levels = yndn)) - 1) %>%
+  mutate(mental_vs_physical = as.numeric(factor(mental_vs_physical, levels = yndn)) - 1) %>%
+  mutate(supervisor = as.numeric(factor(supervisor, levels = yns)) - 1) %>%
+  mutate(coworkers = as.numeric(factor(coworkers, levels = yns)) - 1) %>% 
+  mutate(leave = as.numeric(factor(leave, levels = lv)) - 1) %>% 
+  mutate(no_employees = as.numeric(factor(no_employees, levels = cs)) - 1) %>% 
+  mutate(work_interfere = as.numeric(factor(work_interfere, levels = wi)) - 1)
+
+df2$LGBTQ <- as.numeric(df$Gender=="LBGTQ")
+
+df2[,sapply(df2, is.numeric)] %>% cor() %>% round(2) %>% melt() %>% 
+  ggplot(aes(x=Var1, y=Var2, fill=value)) + 
+  geom_tile() +
+  geom_text(aes(label = round(value, 2)),size=3,colour='white') +
+  scale_fill_viridis() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, size = 12, hjust = 1),
+        axis.title = element_blank())
+```
+
+From the heatmap of correlations, it becomes immediately clear that work interference and a family history of mental illness are variables that correlate most with having sought treatment. We conclude that it was a good idea we've kept work interference in there. Other variables, except for maybe knowing about care options, tend to correlate little with having sought treatment for mental illness. Despite lack of correlations for most variables, let us not discard any of the variables. We will probably not run into trouble as e.g. random forests are quite robust against overfitting.
+
+## Preprocessing of countries/states
+
+We obviously do not want to discard all information on the region a person is from; whether a person seeks treatment may be influenced by both culture as well as where this person is from. Mapping countries to world regions is unsatisfactory for the Americas as the samples from the Americas are overrepresented. An approach to find reasonably balanced groups is to (i) map all non-Americas countries to their respective regions if are present at least 10 times, otherwise "Other", (ii) map states in the US to regions in the US. Let us do this and show what balance we end up with.
+
+```{r fig.height=5, fig.width=8.5}
+
+# Find world regions for countries with at least 10 counts.
+df$worldregion <- countrycode(df$Country, "country.name", "region", warn = TRUE, custom_dict = NULL, custom_match = NULL, origin_regex = FALSE)
+df <- df %>% group_by(worldregion) %>% mutate(n=n()) %>% ungroup() %>% mutate(worldregion = ifelse(n<10,"Other",worldregion))
+
+# Find US regions for states.
+USstates <- cbind(as.character(datasets::state.region), datasets::state.abb) %>% as.data.frame()
+names(USstates) <- c("US_region","state")
+df <- left_join(df,USstates)
+
+# Define region as U.S. region, country if it is in Northern America or otherwise world region. Remove unnecessary columns.
+df <- df %>% mutate(region = ifelse(is.na(US_region),ifelse(worldregion=="Northern America", Country, worldregion), paste0(as.character(US_region),' (USA)'))) %>% mutate(region = factor(region))
+df$Country <- NULL
+df$US_region <- NULL
+df$worldregion <- NULL
+df$state <- NULL
+
+# Make a plot
+df %>% mutate(treatment=factor(treatment), region=factor(region)) %>%
+  group_by(region,treatment) %>% 
+  summarize(n=n()) %>% mutate(percent=n/sum(n)) %>%
+  ggplot(aes(x=region, y=percent, fill=treatment)) +
+  geom_bar(stat="identity") +
+  geom_text(aes(label=n), position=position_stack(vjust=0.5), colour="white") +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, size = 12, hjust = 1),
+      axis.title = element_blank())
+```
+
+The figure shows cumulative distributions of having sought treatment for mental illness over different geographic regions. We see that they are reasonably balanced in terms of numbers of people per bin (in any case more balanced than the original data) and also that there are quite some differences between the different different geographic groups. This motivates why we should keep geographic data.
+
+## Transforming some of the original data and splitting.
+
+```{r}
+# Where ordering is important.
+df <- df %>% mutate(supervisor = as.numeric(factor(supervisor, levels = yns)) - 1) %>%
+  mutate(coworkers = factor(coworkers, levels = yns)) %>% 
+  mutate(leave = factor(leave, levels = lv)) %>% 
+  mutate(no_employees = factor(no_employees, levels = cs)) %>% 
+  mutate(work_interfere = factor(work_interfere, levels = wi))
+
+# Also cast other characters into factor.
+df$n <- NULL
+factorcols <- names(df[-1])
+df[factorcols] <- lapply(df[factorcols], factor)
+
+# Split into training and testing set. We will work with a 70:30 balance.
+set.seed(1414)
+is.train <- sample(c(TRUE,FALSE), nrow(df), replace = T, prob = c(0.7, 0.3))
+train <- df[is.train,]
+test <- df[is.train==FALSE,]
+```
+
+# Learning from the data
+
+Here, we will train classifiers on the training observations and evaluate test performance with the test set. For reproducibility, we will set the seed before training. We will evaluate the performance of bagging, logistic regression, random forests and constructing a simple classification tree.
+
+## Classification tree
+
+```{r}
+set.seed(149113)
+tr.tree = tree(treatment ~ ., data = train)
+tr.pred = predict(tr.tree, test, type = "class")
+accuracy.tree = mean(tr.pred == test$treatment)
+print(paste0("Accuracy of the classification tree: ",accuracy.tree))
+```
+
+We get an accuracy of 80.2% for the classification tree. If we plot the tree and plot the number of splits against the classification performance, we see that we reach this classification performance after already 2 splits on the basis of `work_interfere` and `benefits`. 
+
+```{r fig.height=8, fig.width=10}
+plot(tr.tree)
+text(tr.tree, pretty = 0)
+cv.tr = cv.tree(tr.tree, FUN = prune.misclass, K=20)
+plot(cv.tr$size, cv.tr$dev, type = "b", xlab = "Tree Size", ylab = "Number of Classification Errors")
+```
+
+## Bagging
+
+Bagging can be done by training a random forest with mtry set to the number of parameters in the training set. Note that train in our case too contains the treatment variable, so we should set it to the number of columns minus 1. Evaluating the accuracy of the trained classifier on the test set shows that we do marginally better than the classification tree with an accuracy of 80.9%. Inspecting the variable importance, we see that again `work_interference` is the most important variable. `benefits` is also important but a few other variables also come into play. These include `region`, which indicates that it was a good decision not to discard geographic information altogether.
+
+```{r warning=FALSE}
+set.seed (12421)
+bag.mental = randomForest(treatment ~ .,data=train, mtry = ncol(train-1))
+yhat.bag = predict(bag.mental, newdata=test)
+accuracy.bag = mean(yhat.bag==test$treatment)
+print(paste0("Accuracy of the trained bagging classifier: ",accuracy.bag))
+```
+
+```{r}
+varImpPlot(bag.mental)
+```
+
+
+## Random forest
+
+The caret package includes methods to select the hyperparameter mtry through cross-validation. Note that this procedure is quite intense. Still, let us see if we can get better performance in this way.
+
+```{r warning=FALSE}
+library(caret)
+set.seed (12421)
+control <- trainControl(method="repeatedcv", number=5, repeats=3, search="grid")
+set.seed(137182)
+tunegrid <- expand.grid(.mtry=c(1:15))
+rf_gridsearch <- train(treatment~., data=train, method="rf", metric="Accuracy", tuneGrid=tunegrid, trControl=control)
+print(rf_gridsearch)
+plot(rf_gridsearch)
+```
+
+The optimal final value found by 10-fold cross-validation is `mtry` = 15. Working with this parameter value gives an MSE of 81.2% on the test set. If we do not specify `mtry` we get a slightly higher accuracy at 81.9%. Hence, let us work with the default parameters even though tuning with caret points towards optimality of `mtry` 15. Plotting the OOB error against the number of trees shows that we have reached the plateau on which performance can no longer be increased. The variable importance plot points towards importance of mostly the same variables as in bagging.
+
+```{r warning=FALSE}
+set.seed(12121)
+rf.model <- randomForest(treatment ~ ., data=train, mtry=15, ntrees = 1000)
+set.seed(12121)
+rf.model.default <- randomForest(treatment ~ ., data=train, ntrees=1000)
+rf.predict <- predict(rf.model, test)
+rf.predict.default <- predict(rf.model.default, test)
+accuracy.randomforest <- mean(rf.predict==test$treatment)
+accuracy.randomforest.default <- mean(rf.predict.default == test$treatment)
+print(paste0("Accuracy random forest mtry = 15: ",accuracy.randomforest))
+print(paste0("Accuracy random forest default mtry: ",accuracy.randomforest.default))
+```
+
+```{r}
+plot(rf.model.default, log="y")
+legend('topright', c("OOB Treatment","OOB No treatment","OOB Overall"),lty=1,col=c('red','green','black'))
+varImpPlot(rf.model.default)
+```
+
+## Logistic regression
+
+Logistic regression reaches an accuracy of 80.9% and thereby the same accuracy as the tree. The very significant coefficients include family history, work interference and benefits. Our previous results also have pointed towards importance of these variables.
+
+```{r}
+glm.fit = glm(treatment ~ ., data = train, family = binomial)
+summary(glm.fit)
+glm.predict <- ifelse(predict.glm(glm.fit, newdata=test,type="response")>0.5, "Yes", "No")
+accuracy.logisticregression = mean(glm.predict==test$treatment)
+print(paste0("Accuracy of logistic regression with glm: ",accuracy.logisticregression))
+```
+
+# Discussion of results
+
+Ranking the methods based on accuracy, we obtain (i) random forests, (ii) bagging, (iii) logistic regression and the classification tree. Note, however, that all methods are close to each other in terms of the accuracy. We conclude therefore that random forests for this data set has little added value over a simple logistic regression tree. One reason why we don't see large differences in classification performance might be that `work_interference` by itself correlates already quite strongly with treatment. This is also reflected by the other methods: the classification tree splits directly based on `work_interference`, random forests and bagging both have the highest decrease in the mean gini coefficient for this variable, and logistic regression's coefficient estimates have lowest p-values for the dummy variables based on `work_interference`.
+
+We can finally check whether ensemble prediction performs better. The accuracy of the most simple ensemble formed by joining the different classifiers (not tree) is calculated below. Note that the ensemble performs a bit worse than bagging and has the same accuracy as bagging. Model averaging here thus does not improve classification performance very significantly. This may indicate that the methods classify correctly the same subjects. 
+
+With regards to variable importance, we have seen that `work_interference` is by and large the most important variable. We expand on this a little in the appendix. Other variables reported to be important by many methods include `region`, `age`, `care_options` and `benefits`. Interestingly, the correlation matrix showed for most of these that they correlated to some extent with `treatment`.
+
+```{r}
+glm.predictnum = ifelse(glm.predict == "Yes", 1, 0)
+majorityvote <- ifelse(as.numeric(rf.predict)-1 + as.numeric(rf.predict)-1 + glm.predictnum > 1.5, 1, 0)
+accuracy.ensemble <- mean(majorityvote == ifelse(test$treatment == "Yes", 1, 0))
+```
+
+## Appendix - Short discussion of variable `work_interference`.
+
+I initially thought it was odd for the coefficients on `work_interference`s dummies all positive, indicating that ceteris paribus the log-odds of having treatment increase with having responded to this question per se, rather than having a mental illness interfere with one's work. Looking at how the corresponding question is phrased, it turns out respondents are asked to answer this question only if they have a mental illness. By not responding one thus signals that one does not have a mental illness. This also becomes clear if we plot it (see below) and explains why the variable is so important; we cannot expect people to seek mental illness who do not have a mental illness in the first place.
+
+The plot also quite clearly shows why work_interference is so important; if a respondent responds "Never" or does not fill in the question, we can be quite certain that this person has not had treatment for mental illness.
+
+```{r}
+df %>% subset(select=c('treatment','work_interfere')) %>% group_by(work_interfere, treatment) %>% tally %>%
+  ggplot(aes(x=work_interfere, y=n, fill = treatment)) +
+  geom_bar(stat="identity") +
+  ggtitle("Barplot distribution treatment per response work interference")
+```
